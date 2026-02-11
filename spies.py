@@ -10,6 +10,9 @@ from webbrowser import open_new as web_open
 from pathlib import Path
 from functools import partial
 
+lobby_rooms = []
+spectate_matches = []
+
 temp_file_path = "spies/temp_files/temp_image.png" 
 default_avatar_path = "spies/assets/default_avatar.png"
 toaster = InteractableWindowsToaster('AOE2: Spies')
@@ -18,10 +21,36 @@ spyToast = Toast('Spy Alert')
 player_name = "Necron99"
 profileid = 10056062
 
+class Rooms:
+    def __init__(self, lobby_rooms):
+       self._rooms = []
+       
+    def __iter__(self):
+        return iter(self._rooms)
+    
+    def __len__(self):
+        return len(self._rooms)
+
+    def __getitem__(self, index):
+        return self._rooms[index]
+    
+    def add(self, room):
+        self._rooms.append(room)
+    
+    def clear(self):
+        self._rooms.clear()
+        
+    def update(self, event, response_type):  
+        received_lobby_rooms = [event.get(response_type, {}).get(match_id, {}) for match_id in event.get(response_type, [])]
+        removed_lobby_rooms = [room for room in lobby_rooms if room.get("matchid") not in [m.get("matchid") for m in received_lobby_rooms]]
+        self._rooms = removed_lobby_rooms + received_lobby_rooms
+
+
 def get_player_avatar(player_name: str, match):
-    player_slot = lobby.get_player_slot(player_name, match)
-    avatar_url = player_slot.get("steam_avatar", None)
     avatar_url = None
+    player_slot = lobby.get_player_slot(player_name, match)
+    if player_slot:
+        avatar_url = player_slot.get("steam_avatar", None)
     if avatar_url:
         avatar_filepath = download_image(avatar_url)
     else:
@@ -68,17 +97,18 @@ def dismissed_callback(dismissedEventArgs: ToastDismissedEventArgs):
 def failed_callback(failedEventArgs: ToastFailedEventArgs):
     print(f"Toast failed: {failedEventArgs.reason}")
 
-def display_toast(player_name: str, match, event):  
-    short_response_type = lobby.get_short_response_type(event)
+def display_toast(player_name: str, match, status: str):  
+    short_response_type = status
     player_data = lobby.get_player_slot(player_name, match)
-    player_civ_name = lobby.get_civ_name(player_data.get("civilization", -1))
-    
+    if player_data:
+        player_civ_name = lobby.get_civ_name(player_data.get("civilization", -1))
+    else:
+        player_civ_name = "Player Unavailable"
+
     time_dilation = 7 # Server time is approx 7 seconds ahead of local time, so we subtract 7 seconds from the match creation time to get a more accurate "time alive" for the match
     created_time = match.get("created_time", int(time.time())) - time_dilation
     match_time_alive = int(time.time()) - created_time
-    
-    print(f"{player_name} id is {player_data.get('profileid', 'Unknown')}")
-        
+            
     toast_fields = [
         f"{player_name[:25]} joined {short_response_type.lower()}:\n{match.get('description', 'a {short_response_type.lower()}')}",
         f"Map: {match.get('map_name', 'Unknown Map')} | Playing as: {player_civ_name}",
@@ -98,12 +128,60 @@ def display_toast(player_name: str, match, event):
     print("="*40)
     print("\n".join(toast_fields))
 
+def update_lobby_rooms(event, response_type: str):
+    global lobby_rooms
+    received_lobby_rooms = [event.get(response_type, {}).get(match_id, {}) for match_id in event.get(response_type, [])]
+    removed_lobby_rooms = [room for room in lobby_rooms if room.get("matchid") not in [m.get("matchid") for m in received_lobby_rooms]]
+    lobby_rooms = removed_lobby_rooms + received_lobby_rooms
+
+def update_spectate_matches(event, response_type: str):
+    global spectate_matches
+    received_spectate_matches = [event.get(response_type, {}).get(match_id, {}) for match_id in event.get(response_type, [])]
+    removed_spectate_matches = [match for match in spectate_matches if match.get("matchid") not in [m.get("matchid") for m in received_spectate_matches]]
+    spectate_matches = removed_spectate_matches + received_spectate_matches
+    print(f"Number of spectate matches: {len(spectate_matches)}")
+    
 def spy(event, **kwargs):
-    matches = lobby.get_new_match_ids(event)
-    results = lobby.search_matches_for_player(event, player_name=player_name, match_ids=matches)
-    match = lobby.get_match_by_id(event, results[0]) if results else None
-    if results:
-        display_toast(player_name=player_name, match=match, event=event)
+    match = None
+    response_type = lobby.get_response_type(event)
+    match response_type:
+        case "lobby_match_all":
+            update_lobby_rooms(event, response_type)
+        case "lobby_match_update":
+            update_lobby_rooms(event, response_type)     
+        case "spectate_match_all":
+            update_spectate_matches(event, response_type)
+            match = lobby.search_matches_for_player(player_name, spectate_matches)
+            status = "spectate"
+            match_id = match.get("matchid", None) if match else None
+        case "spectate_match_update":
+            update_spectate_matches(event, response_type)   
+            match = lobby.search_matches_for_player(player_name, spectate_matches)
+            status = "spectate"
+            match_id = match.get("matchid", None) if match else None
+        case "player_status":
+            player_status = event.get('player_status', {})
+            player_id = list(player_status.keys())[0] if player_status else None
+            if player_id is None:
+                print("No player status found in event.")
+                return
+            
+            status = player_status.get(player_id, None).get('status', None)
+            match_id = player_status.get(player_id, None).get('matchid', None)
+            print(f"{player_name}'s status: {status}, matchid: {match_id}")
+            
+            if status == "lobby":
+                if len(lobby_rooms) > 0:
+                    print(f"Searching for match ID {match_id} in lobby rooms...")
+                    match = next((m for m in lobby_rooms if str(m.get("matchid")) == str(match_id)), None)
+            if status == "spectate":
+                if len(spectate_matches) > 0:
+                    print(f"Searching for match ID {match_id} in spectate matches...")
+                    match = next((m for m in spectate_matches if str(m.get("matchid")) == str(match_id)), None)
+                
+    if match:
+        print(f"Displaying toast for {player_name} in match ID {match_id} with status {status}.")
+        display_toast(player_name=player_name, match=match, status=status)
 
 def main():
     subscriptions = lobby.subscribe(["lobby", "spectate", "players"], player_ids = [profileid])

@@ -1,4 +1,4 @@
-import lobby
+from lobby import lobby
 
 profileid = 10056062
 
