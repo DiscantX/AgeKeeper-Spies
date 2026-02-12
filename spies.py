@@ -22,9 +22,11 @@ player_name = "Necron99"
 profileid = 10056062
 
 class Rooms:
-    def __init__(self, lobby_rooms):
+    def __init__(self):
        self._rooms = []
-       
+       self._subscriptions = lobby.subscribe(["lobby"])
+       lobby.connect_to_subscriptions(self._subscriptions, self.read)
+
     def __iter__(self):
         return iter(self._rooms)
     
@@ -33,7 +35,10 @@ class Rooms:
 
     def __getitem__(self, index):
         return self._rooms[index]
-    
+        
+    def read(self, event, **kwargs):
+        print("ROOMS CLASS EVENT", str(event)[:400])
+            
     def add(self, room):
         self._rooms.append(room)
     
@@ -45,6 +50,7 @@ class Rooms:
         removed_lobby_rooms = [room for room in lobby_rooms if room.get("matchid") not in [m.get("matchid") for m in received_lobby_rooms]]
         self._rooms = removed_lobby_rooms + received_lobby_rooms
 
+rooms = Rooms()
 
 def get_player_avatar(player_name: str, match):
     avatar_url = None
@@ -143,6 +149,7 @@ def update_spectate_matches(event, response_type: str):
     
 def spy(event, **kwargs):
     match = None
+    status = None
     response_type = lobby.get_response_type(event)
     match response_type:
         case "lobby_match_all":
@@ -151,14 +158,8 @@ def spy(event, **kwargs):
             update_lobby_rooms(event, response_type)     
         case "spectate_match_all":
             update_spectate_matches(event, response_type)
-            match = lobby.search_matches_for_player(player_name, spectate_matches)
-            status = "spectate"
-            match_id = match.get("matchid", None) if match else None
         case "spectate_match_update":
             update_spectate_matches(event, response_type)   
-            match = lobby.search_matches_for_player(player_name, spectate_matches)
-            status = "spectate"
-            match_id = match.get("matchid", None) if match else None
         case "player_status":
             player_status = event.get('player_status', {})
             player_id = list(player_status.keys())[0] if player_status else None
@@ -184,6 +185,7 @@ def spy(event, **kwargs):
         display_toast(player_name=player_name, match=match, status=status)
 
 def main():
+    pass
     subscriptions = lobby.subscribe(["lobby", "spectate", "players"], player_ids = [profileid])
     lobby.connect_to_subscriptions(subscriptions, spy)
 
