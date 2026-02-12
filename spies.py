@@ -28,7 +28,6 @@ SPIES_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 WINMM = ctypes.windll.winmm
 MCI_ALIAS = "AgeKeeperSpyAlert"
 
-
 def resolve_asset_path(filename: str, *candidate_dirs: Path) -> Path:
     for base_dir in candidate_dirs:
         asset_path = base_dir / filename
@@ -66,6 +65,58 @@ watchlist_entries = []
 
 lobby_matches = MatchBook("lobby")
 spectate_matches = MatchBook("spectate")
+pending_match_tasks = {}
+notified_match_keys = set()
+
+
+def _get_match_from_book(status: str, match_id):
+    if status == "lobby":
+        match_book = lobby_matches
+    elif status == "spectate":
+        match_book = spectate_matches
+    else:
+        return None
+    return next(
+        (match for match in match_book if str(match.get("matchid")) == str(match_id)),
+        None,
+    )
+
+
+def _show_toast_for_player_match(player_id: str, match, status: str, match_id) -> None:
+    key = (str(player_id), str(match_id), status)
+    if key in notified_match_keys:
+        return
+
+    player_entry = watchlist_by_id.get(str(player_id), {})
+    player_name = player_entry.get("userName") or str(player_id)
+    avatar_filepath = resolve_avatar_filepath(
+        player_entry, match, watchlist_entries, save_watchlist
+    )
+    display_toast(
+        player_name=player_name,
+        match=match,
+        status=status,
+        avatar_filepath=avatar_filepath,
+    )
+    notified_match_keys.add(key)
+
+
+async def _wait_for_match_and_toast(
+    player_id: str,
+    status: str,
+    match_id,
+    timeout_seconds: float = 12.0,
+    poll_interval_seconds: float = 0.4,
+) -> None:
+    key = (str(player_id), str(match_id), status)
+    start = time.monotonic()
+    while time.monotonic() - start < timeout_seconds:
+        match = _get_match_from_book(status, match_id)
+        if match:
+            _show_toast_for_player_match(player_id, match, status, match_id)
+            break
+        await asyncio.sleep(poll_interval_seconds)
+    pending_match_tasks.pop(key, None)
 
 def activated_callback(
     activatedEventArgs: ToastActivatedEventArgs, short_response_type: str, match_id: str
@@ -110,7 +161,7 @@ def display_toast(player_name: str, match, status: str, avatar_filepath: str = d
             subscription_description = "game"
             
     toast_fields = [
-        f"{player_name[:25]} joined {subscription_description}:\n{match.get('description', f'a {subscription_description}')}",
+        f"{player_name[:25]} is in {subscription_description}:\n{match.get('description', f'a {subscription_description}')}",
         f"Map: {match.get('map_name', 'Unknown Map')} | Playing as: {player_civ_name}",
         f"Started: {match_time_alive}s ago | {match.get('slots_taken', -1)} Player{'s' if match.get('slots_taken', -1) != 1 else ''} in {subscription_description}",
     ]
@@ -140,8 +191,6 @@ def display_toast(player_name: str, match, status: str, avatar_filepath: str = d
     print("\n".join(toast_fields))
 
 def spy(event, **kwargs):
-    match = None
-    status = None
     response_type = lobby.get_response_type(event)
     match response_type:
         case "player_status":
@@ -153,37 +202,37 @@ def spy(event, **kwargs):
 
             status = player_status.get(player_id, None).get("status", None)
             match_id = player_status.get(player_id, None).get("matchid", None)
+            match = None
             player_entry = watchlist_by_id.get(str(player_id), {})
             player_name = player_entry.get("userName") or str(player_id)
             print(f"{player_name}'s status: {status}, matchid: {match_id}")
 
             if status == "lobby":
                 if len(lobby_matches) > 0:
-                    match = next(
-                        (match for match in lobby_matches if str(match.get("matchid")) == str(match_id)),
-                        None,
-                    )
+                    match = _get_match_from_book(status, match_id)
                     lobby_matches.print_number_of_matches()
+                else:
+                    match = None
             if status == "spectate":
                 if len(spectate_matches) > 0:
-                    match = next(
-                        (match for match in spectate_matches if str(match.get("matchid")) == str(match_id)),
-                        None,
-                    )
+                    print([match.get("matchid") for match in spectate_matches])
+                    match = _get_match_from_book(status, match_id)
                     spectate_matches.print_number_of_matches()
+                else:
+                    match = None
 
-    if match:
-        player_entry = watchlist_by_id.get(str(player_id), {})
-        player_name = player_entry.get("userName") or str(player_id)
-        avatar_filepath = resolve_avatar_filepath(
-            player_entry, match, watchlist_entries, save_watchlist
-        )
-        display_toast(
-            player_name=player_name,
-            match=match,
-            status=status,
-            avatar_filepath=avatar_filepath,
-        )
+            key = (str(player_id), str(match_id), status)
+            pending_task = pending_match_tasks.get(key)
+
+            if match:
+                if pending_task and not pending_task.done():
+                    pending_task.cancel()
+                _show_toast_for_player_match(player_id, match, status, match_id)
+            elif status in ("lobby", "spectate"):
+                if pending_task is None or pending_task.done():
+                    pending_match_tasks[key] = asyncio.create_task(
+                        _wait_for_match_and_toast(player_id, status, match_id)
+                    )
 
 
 async def main_async():
