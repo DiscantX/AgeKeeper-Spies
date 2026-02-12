@@ -4,72 +4,153 @@ from windows_toasts import(
         ToastActivatedEventArgs, ToastDismissedEventArgs, ToastFailedEventArgs
     )
 from lobby import lobby
+from lobby.match_book import MatchBook
+from aoe2api import aoe2api
 import urllib.request
+import urllib.parse
 import time
 from webbrowser import open_new as web_open
 from pathlib import Path
+import json
 from functools import partial
-
-lobby_rooms = []
-spectate_matches = []
+import asyncio
 
 temp_file_path = "spies/temp_files/temp_image.png" 
 default_avatar_path = "spies/assets/default_avatar.png"
+watchlist_path = Path("spies/watchlist.json")
+avatars_dir = Path("spies/avatars")
 toaster = InteractableWindowsToaster('AOE2: Spies')
 spyToast = Toast('Spy Alert')
 
-player_name = "Necron99"
-profileid = 10056062
+watchlist_by_id = {}
+watchlist_profile_ids = []
+watchlist_entries = []
 
-class Rooms:
-    def __init__(self):
-       self._rooms = []
-       self._subscriptions = lobby.subscribe(["lobby"])
-       lobby.connect_to_subscriptions(self._subscriptions, self.read)
+lobby_matches = MatchBook("lobby")
+spectate_matches = MatchBook("spectate")
 
-    def __iter__(self):
-        return iter(self._rooms)
-    
-    def __len__(self):
-        return len(self._rooms)
+def create_empty_watchlist():
+    if not watchlist_path.exists():
+        watchlist_path.parent.mkdir(parents=True, exist_ok=True)
+        template = [
+            {
+                "userName": "",
+                "profileid": "",
+                "avatar_filepath": default_avatar_path,
+            }
+        ]
+        with open(watchlist_path, "w", encoding="utf-8") as f:
+            json.dump(template, f, indent=2)
+        print(f"Created watchlist template at {watchlist_path}")
 
-    def __getitem__(self, index):
-        return self._rooms[index]
-        
-    def read(self, event, **kwargs):
-        print("ROOMS CLASS EVENT", str(event)[:400])
-            
-    def add(self, room):
-        self._rooms.append(room)
-    
-    def clear(self):
-        self._rooms.clear()
-        
-    def update(self, event, response_type):  
-        received_lobby_rooms = [event.get(response_type, {}).get(match_id, {}) for match_id in event.get(response_type, [])]
-        removed_lobby_rooms = [room for room in lobby_rooms if room.get("matchid") not in [m.get("matchid") for m in received_lobby_rooms]]
-        self._rooms = removed_lobby_rooms + received_lobby_rooms
+def load_watchlist():
+    if not watchlist_path.exists():
+        create_empty_watchlist()
+        return []
 
-rooms = Rooms()
+    with open(watchlist_path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
 
-def get_player_avatar(player_name: str, match):
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("Watchlist JSON must be a list of player entries or profile IDs.")
+
+    normalized = []
+    ids_missing_usernames = []
+    usernames_missing_ids = []
+    for item in raw:
+        entry = {}
+        if isinstance(item, (int, str)):
+            entry["profileid"] = str(item)
+        elif isinstance(item, dict):
+            entry = dict(item)
+            if "profileid" in entry and entry["profileid"] is not None:
+                entry["profileid"] = str(entry["profileid"])
+        else:
+            continue
+
+        if "avatar_filepath" not in entry or not entry.get("avatar_filepath"):
+            entry["avatar_filepath"] = default_avatar_path
+
+        if entry.get("profileid") and not entry.get("userName"):
+            ids_missing_usernames.append(entry["profileid"])
+
+        if entry.get("userName") and not entry.get("profileid"):
+            usernames_missing_ids.append(entry["userName"])
+
+        normalized.append(entry)
+
+    updated = False
+    if ids_missing_usernames:
+        usernames = aoe2api.get_usernames_from_ids(ids_missing_usernames)
+        id_to_username = dict(zip(ids_missing_usernames, usernames))
+        for entry in normalized:
+            pid = entry.get("profileid")
+            if pid in id_to_username and not entry.get("userName"):
+                entry["userName"] = id_to_username.get(pid) or ""
+                updated = True
+
+    if usernames_missing_ids:
+        ids = aoe2api.get_ids_from_usernames(usernames_missing_ids)
+        username_to_id = dict(zip(usernames_missing_ids, ids))
+        for entry in normalized:
+            username = entry.get("userName")
+            if username in username_to_id and not entry.get("profileid"):
+                entry["profileid"] = str(username_to_id.get(username) or "")
+                updated = True
+
+    if updated:
+        with open(watchlist_path, "w", encoding="utf-8") as f:
+            json.dump(normalized, f, indent=2)
+
+    return normalized
+
+def save_watchlist(entries):
+    with open(watchlist_path, "w", encoding="utf-8") as f:
+        json.dump(entries, f, indent=2)
+
+def avatar_url_to_path(avatar_url: str) -> Path:
+    parsed = urllib.parse.urlparse(avatar_url)
+    filename = Path(parsed.path).name
+    if not filename:
+        filename = urllib.parse.quote(avatar_url, safe="")
+    return avatars_dir / filename
+
+def resolve_avatar_filepath(player_entry: dict, match) -> str:
+    player_name = player_entry.get("userName") or ""
     avatar_url = None
-    player_slot = lobby.get_player_slot(player_name, match)
+    player_slot = lobby.get_player_slot(player_name, match) if player_name else None
     if player_slot:
         avatar_url = player_slot.get("steam_avatar", None)
-    if avatar_url:
-        avatar_filepath = download_image(avatar_url)
-    else:
-        print("No avatar URL found, using default avatar.")
-        avatar_filepath = default_avatar_path
+
+    if not avatar_url:
+        print("No avatar URL found, using fallback avatar.")
+        return player_entry.get("avatar_filepath") or default_avatar_path
+
+    avatar_path = avatar_url_to_path(avatar_url)
+    if not avatar_path.exists():
+        download_image(avatar_url, filepath=str(avatar_path))
+
+    avatar_filepath = str(avatar_path)
+    if player_entry.get("avatar_filepath") != avatar_filepath:
+        old_path = Path(player_entry.get("avatar_filepath") or "")
+        if old_path.exists() and avatars_dir in old_path.parents:
+            try:
+                old_path.unlink()
+            except OSError:
+                pass
+        player_entry["avatar_filepath"] = avatar_filepath
+        save_watchlist(watchlist_entries)
+
     return avatar_filepath
 
-def add_player_avatar_to_toast(player_name: str, match):
-    filepath = get_player_avatar(player_name, match)
-    spyToast.AddImage(ToastDisplayImage.fromPath(filepath, position = ToastImagePosition.AppLogo))
+def add_player_avatar_to_toast(avatar_filepath: str):
+    spyToast.AddImage(ToastDisplayImage.fromPath(avatar_filepath, position = ToastImagePosition.AppLogo))
 
 # Helper function to download an image and return local path
 def download_image(url, filepath=temp_file_path):
+    Path(filepath).parent.mkdir(parents=True, exist_ok=True)
     path, _ = urllib.request.urlretrieve(url, filepath)
     return str(Path(path).resolve())
 
@@ -103,7 +184,7 @@ def dismissed_callback(dismissedEventArgs: ToastDismissedEventArgs):
 def failed_callback(failedEventArgs: ToastFailedEventArgs):
     print(f"Toast failed: {failedEventArgs.reason}")
 
-def display_toast(player_name: str, match, status: str):  
+def display_toast(player_name: str, match, status: str, avatar_filepath: str = default_avatar_path):
     short_response_type = status
     player_data = lobby.get_player_slot(player_name, match)
     if player_data:
@@ -126,40 +207,19 @@ def display_toast(player_name: str, match, status: str):
     spyToast.on_failed = failed_callback
     spyToast.text_fields = toast_fields
     spyToast.AddImage(ToastDisplayImage.fromPath('assets/AgeKeeperBanner_Cropped.png', position = ToastImagePosition.Hero))
-    add_player_avatar_to_toast(player_name, match)
+    add_player_avatar_to_toast(avatar_filepath)
     
     toaster.show_toast(spyToast)
     
     print("\nNew Spy Alert:")
     print("="*40)
     print("\n".join(toast_fields))
-
-def update_lobby_rooms(event, response_type: str):
-    global lobby_rooms
-    received_lobby_rooms = [event.get(response_type, {}).get(match_id, {}) for match_id in event.get(response_type, [])]
-    removed_lobby_rooms = [room for room in lobby_rooms if room.get("matchid") not in [m.get("matchid") for m in received_lobby_rooms]]
-    lobby_rooms = removed_lobby_rooms + received_lobby_rooms
-
-def update_spectate_matches(event, response_type: str):
-    global spectate_matches
-    received_spectate_matches = [event.get(response_type, {}).get(match_id, {}) for match_id in event.get(response_type, [])]
-    removed_spectate_matches = [match for match in spectate_matches if match.get("matchid") not in [m.get("matchid") for m in received_spectate_matches]]
-    spectate_matches = removed_spectate_matches + received_spectate_matches
-    print(f"Number of spectate matches: {len(spectate_matches)}")
     
 def spy(event, **kwargs):
     match = None
     status = None
     response_type = lobby.get_response_type(event)
-    match response_type:
-        case "lobby_match_all":
-            update_lobby_rooms(event, response_type)
-        case "lobby_match_update":
-            update_lobby_rooms(event, response_type)     
-        case "spectate_match_all":
-            update_spectate_matches(event, response_type)
-        case "spectate_match_update":
-            update_spectate_matches(event, response_type)   
+    match response_type:  
         case "player_status":
             player_status = event.get('player_status', {})
             player_id = list(player_status.keys())[0] if player_status else None
@@ -169,25 +229,47 @@ def spy(event, **kwargs):
             
             status = player_status.get(player_id, None).get('status', None)
             match_id = player_status.get(player_id, None).get('matchid', None)
+            player_entry = watchlist_by_id.get(str(player_id), {})
+            player_name = player_entry.get("userName") or str(player_id)
             print(f"{player_name}'s status: {status}, matchid: {match_id}")
             
             if status == "lobby":
-                if len(lobby_rooms) > 0:
-                    print(f"Searching for match ID {match_id} in lobby rooms...")
-                    match = next((m for m in lobby_rooms if str(m.get("matchid")) == str(match_id)), None)
+                if len(lobby_matches) > 0:
+                    # print(f"Searching for match ID {match_id} in lobby matches...")
+                    match = next((m for m in lobby_matches if str(m.get("matchid")) == str(match_id)), None)
+                    lobby_matches.print_number_of_matches()
             if status == "spectate":
                 if len(spectate_matches) > 0:
-                    print(f"Searching for match ID {match_id} in spectate matches...")
+                    # print(f"Searching for match ID {match_id} in spectate matches...")
                     match = next((m for m in spectate_matches if str(m.get("matchid")) == str(match_id)), None)
+                    spectate_matches.print_number_of_matches()
                 
     if match:
-        print(f"Displaying toast for {player_name} in match ID {match_id} with status {status}.")
-        display_toast(player_name=player_name, match=match, status=status)
+        player_entry = watchlist_by_id.get(str(player_id), {})
+        player_name = player_entry.get("userName") or str(player_id)
+        avatar_filepath = resolve_avatar_filepath(player_entry, match)
+        display_toast(player_name=player_name, match=match, status=status, avatar_filepath=avatar_filepath)
+
+async def main_async():
+    lobby_matches.start()
+    spectate_matches.start()
+    watchlist = load_watchlist()
+    global watchlist_by_id
+    global watchlist_profile_ids
+    global watchlist_entries
+    watchlist_entries = watchlist
+    watchlist_by_id = {str(entry.get("profileid")): entry for entry in watchlist if entry.get("profileid")}
+    watchlist_profile_ids = list(watchlist_by_id.keys())
+    if not watchlist_profile_ids:
+        print("Watchlist is empty. Add profile IDs to spies/watchlist.json to start spying.")
+        return
+
+    subscriptions = lobby.subscribe(["spectate", "players"], player_ids = watchlist_profile_ids)
+    lobby.connect_to_subscriptions_task(subscriptions, spy)
+    await asyncio.Event().wait()
 
 def main():
-    pass
-    subscriptions = lobby.subscribe(["lobby", "spectate", "players"], player_ids = [profileid])
-    lobby.connect_to_subscriptions(subscriptions, spy)
+    asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
