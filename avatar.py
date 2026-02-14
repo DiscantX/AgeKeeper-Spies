@@ -38,7 +38,8 @@ def resolve_avatar_filepath(
 
     avatar_path = avatar_url_to_path(avatar_url, avatars_dir=avatars_dir)
     if not avatar_path.exists():
-        download_image(avatar_url, filepath=str(avatar_path))
+        full_avatar_url = avatar_url.split(".jpg")[0] + "_full.jpg"
+        download_image(full_avatar_url, filepath=str(avatar_path))
 
     avatar_filepath = str(avatar_path)
     if player_entry.get("avatar_filepath") != avatar_filepath:
