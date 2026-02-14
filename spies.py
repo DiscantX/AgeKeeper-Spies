@@ -6,6 +6,7 @@ from windows_toasts import (
     ToastAudio,
     ToastDisplayImage,
     ToastImagePosition,
+    ToastScenario,
     ToastActivatedEventArgs,
     ToastDismissedEventArgs,
     ToastFailedEventArgs,
@@ -150,7 +151,7 @@ def display_toast(player_name: str, match, status: str, avatar_filepath: str = d
         player_civ_name = "Player Unavailable"
 
     # Server time is approx 7 seconds ahead of local time.
-    time_dilation = 7
+    time_dilation = 0
     created_time = match.get("created_time", int(time.time())) - time_dilation
     match_time_alive = int(time.time()) - created_time
     subscription_description = "Unkown"
@@ -169,6 +170,7 @@ def display_toast(player_name: str, match, status: str, avatar_filepath: str = d
     spyToast.on_activated = partial(activated_callback,short_response_type=short_response_type,match_id=match.get("matchid", -1),)
     spyToast.on_dismissed = dismissed_callback
     spyToast.on_failed = failed_callback
+    # spyToast.scenario = ToastScenario.IncomingCall
     spyToast.text_fields = toast_fields
     banner_path = resolve_asset_path("AgeKeeperBanner_Cropped.png", PROJECT_ASSETS_DIR, SPIES_ASSETS_DIR)
     audio_path = resolve_asset_path("16_enemy_sighted.mp3", SPIES_ASSETS_DIR, PROJECT_ASSETS_DIR)
@@ -189,6 +191,7 @@ def display_toast(player_name: str, match, status: str, avatar_filepath: str = d
     print("\nNew Spy Alert:")
     print("=" * 40)
     print("\n".join(toast_fields))
+    print(f"Start time: {time.ctime(time.time())}\n")
 
 def spy(event, **kwargs):
     response_type = lobby.get_response_type(event)
@@ -200,9 +203,9 @@ def spy(event, **kwargs):
                 print("No player status found in event.")
                 return
 
+            match = None
             status = player_status.get(player_id, None).get("status", None)
             match_id = player_status.get(player_id, None).get("matchid", None)
-            match = None
             player_entry = watchlist_by_id.get(str(player_id), {})
             player_name = player_entry.get("userName") or str(player_id)
             print(f"{player_name}'s status: {status}, matchid: {match_id}")
@@ -215,7 +218,6 @@ def spy(event, **kwargs):
                     match = None
             if status == "spectate":
                 if len(spectate_matches) > 0:
-                    print([match.get("matchid") for match in spectate_matches])
                     match = _get_match_from_book(status, match_id)
                     spectate_matches.print_number_of_matches()
                 else:
