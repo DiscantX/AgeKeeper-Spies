@@ -21,7 +21,7 @@ def avatar_url_to_path(avatar_url: str, avatars_dir: Path = AVATARS_DIR) -> Path
 def resolve_avatar_filepath(
     player_entry: dict,
     match,
-    watchlist_entries,
+    watchlist_by_id,
     save_watchlist,
     default_avatar_path: str = DEFAULT_AVATAR_PATH,
     avatars_dir: Path = AVATARS_DIR,
@@ -50,7 +50,7 @@ def resolve_avatar_filepath(
             except OSError:
                 pass
         player_entry["avatar_filepath"] = avatar_filepath
-        save_watchlist(watchlist_entries)
+        save_watchlist(watchlist_by_id)
 
     return avatar_filepath
 
