@@ -1,3 +1,5 @@
+"""Async toast queue, dedupe, and delay orchestration for player updates."""
+
 import asyncio
 from contextlib import suppress
 

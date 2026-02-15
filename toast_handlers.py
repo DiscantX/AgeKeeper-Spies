@@ -1,3 +1,5 @@
+"""Toast callback and launch-action helpers for Windows notifications."""
+
 from __future__ import annotations
 
 from windows_toasts import ToastDismissedEventArgs, ToastFailedEventArgs

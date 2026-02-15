@@ -1,3 +1,9 @@
+"""Main runtime for the Spies watcher service.
+
+Coordinates watchlist monitoring, lobby/spectate match tracking, toast payload
+construction, alert delivery, and startup/CLI behavior.
+"""
+
 from pathlib import Path                            #Creating path objects
 import os
 import sys

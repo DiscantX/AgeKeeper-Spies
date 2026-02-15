@@ -1,3 +1,5 @@
+"""Command-line argument parsing and command dispatch for Spies."""
+
 import argparse
 
 from spies import task_registration

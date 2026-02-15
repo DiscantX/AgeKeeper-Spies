@@ -1,3 +1,5 @@
+"""Watchlist loading, indexing, and persistence helpers for Spies."""
+
 from pathlib import Path
 import json
 

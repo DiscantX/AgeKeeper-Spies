@@ -1,3 +1,5 @@
+"""Logging configuration and tailing utilities for the Spies runtime."""
+
 from __future__ import annotations
 
 import logging
