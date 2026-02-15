@@ -2,8 +2,6 @@ from pathlib import Path                            #Creating path objects
 import os
 import sys
 import argparse
-import logging
-from logging.handlers import RotatingFileHandler
 from windows_toasts import (                        #Creating the Windows toasts
     InteractableWindowsToaster,
     Toast,
@@ -11,12 +9,10 @@ from windows_toasts import (                        #Creating the Windows toasts
     ToastDuration,
     ToastDisplayImage,
     ToastImagePosition,
-    ToastDismissedEventArgs,
-    ToastFailedEventArgs,
 )
 import asyncio                                      #Asyncronous functions
 import time                                         #Getting/parsing current time
-from collections import deque
+from functools import partial
 
 # Allow running this file directly (e.g., via pythonw spies/spies.py).
 if __package__ is None or __package__ == "":
@@ -35,58 +31,15 @@ from spies.audio import play_alert_audio
 from spies import task_registration
 from shared.process_guard import acquire_single_instance_lock
 from spies.toast_queue import ToastQueueManager
+from spies.logging_utils import configure_rotating_logger, resolve_log_file, tail_logs
+from spies.toast_handlers import log_toast_dismissal, log_toast_failure
 
 # Assign default variables
 default_avatar_path = DEFAULT_AVATAR_PATH
 PROJECT_ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 SPIES_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
-
-def _resolve_log_file() -> Path:
-    override_dir = os.getenv("AGEKEEPER_LOG_DIR")
-    if override_dir:
-        return Path(override_dir) / "spies.log"
-
-    programdata = os.getenv("ProgramData")
-    if programdata:
-        return Path(programdata) / "AgeKeeper" / "logs" / "spies.log"
-
-    return Path(__file__).resolve().parent / "logs" / "spies.log"
-
-
-SPIES_LOG_FILE = _resolve_log_file()
-
-
-def tail_logs(lines: int = 100, follow: bool = True, poll_interval: float = 0.5) -> int:
-    """Print recent log lines and optionally follow appended output."""
-    if lines < 0:
-        print("--tail-lines must be >= 0")
-        return 2
-
-    log_file = SPIES_LOG_FILE
-    if not log_file.exists():
-        print(f"Log file does not exist yet: {log_file}")
-        return 1
-
-    try:
-        with log_file.open("r", encoding="utf-8", errors="replace") as handle:
-            if lines > 0:
-                for line in deque(handle, maxlen=lines):
-                    print(line, end="")
-            else:
-                handle.seek(0, os.SEEK_END)
-
-            if not follow:
-                return 0
-
-            while True:
-                line = handle.readline()
-                if line:
-                    print(line, end="", flush=True)
-                    continue
-                time.sleep(poll_interval)
-    except KeyboardInterrupt:
-        return 0
+SPIES_LOG_FILE = resolve_log_file()
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
@@ -177,52 +130,11 @@ def _handle_task_cli(cli_args) -> int | None:
     return task_registration.show_status(task_name=cli_args.task_name)
 
 
-def _configure_logging() -> logging.Logger:
-    global SPIES_LOG_FILE
-
-    logger = logging.getLogger("agekeeper.spies")
-    if logger.handlers:
-        return logger
-
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        "%Y-%m-%d %H:%M:%S",
-    )
-
-    log_file = SPIES_LOG_FILE
-    try:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(
-            log_file,
-            maxBytes=1_000_000,
-            backupCount=5,
-            encoding="utf-8",
-        )
-    except OSError:
-        # Fallback keeps logging available if preferred location is unavailable.
-        fallback = Path(__file__).resolve().parent / "logs" / "spies.log"
-        fallback.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(
-            fallback,
-            maxBytes=1_000_000,
-            backupCount=5,
-            encoding="utf-8",
-        )
-        SPIES_LOG_FILE = fallback
-
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
-    logger.propagate = False
-    return logger
-
-
-logger = _configure_logging()
+logger, SPIES_LOG_FILE = configure_rotating_logger(
+    logger_name="agekeeper.spies",
+    preferred_log_file=SPIES_LOG_FILE,
+    fallback_log_file=Path(__file__).resolve().parent / "logs" / "spies.log",
+)
 
 # Instantiate the toaster object for later use
 toaster = InteractableWindowsToaster("AOE2: Spies")
@@ -233,22 +145,6 @@ watchlist = Watchlist()
 #Instantiate the MatchBooks, which will store current matches/lobbies
 lobby_matches = MatchBook("lobby")
 spectate_matches = MatchBook("spectate")
-
-def dismissed_callback(dismissedEventArgs: ToastDismissedEventArgs):
-    """Handle toast dismissal and clean up the temporary avatar image."""
-    dismissal_reasons = {
-        0: "UserCanceled",
-        1: "ApplicationHidden",
-        2: "TimedOut",
-    }
-    reason = dismissedEventArgs.reason
-    reason_value = int(reason)
-    reason_name = dismissal_reasons.get(reason_value, str(reason))
-    logger.info("Toast dismissed reason: %s (%s)", reason_name, reason_value)
-
-def failed_callback(failedEventArgs: ToastFailedEventArgs):
-    """Log toast delivery failures reported by the Windows toast API."""
-    logger.error("Toast failed: %s", failedEventArgs.reason)
 
 def display_toast(player_name: str, match, status: str, avatar_filepath: str = default_avatar_path):
     """Build and display a spy alert toast with map, civ, and avatar details."""
@@ -270,8 +166,8 @@ def display_toast(player_name: str, match, status: str, avatar_filepath: str = d
         logger.info("Toast launch action configured: %s", protocol_link)
 
     # Register toast callbacks
-    spy_toast.on_dismissed = dismissed_callback
-    spy_toast.on_failed = failed_callback
+    spy_toast.on_dismissed = partial(log_toast_dismissal, logger=logger)
+    spy_toast.on_failed = partial(log_toast_failure, logger=logger)
     
     # Prefer standard long-duration toasts over IncomingCall scenario; this is
     # more reliable for repeated click activation behavior.
@@ -427,5 +323,11 @@ if __name__ == "__main__":
     if task_cli_result is not None:
         raise SystemExit(task_cli_result)
     if cli_args.tail_logs:
-        raise SystemExit(tail_logs(lines=cli_args.tail_lines, follow=not cli_args.no_follow))
+        raise SystemExit(
+            tail_logs(
+                log_file=SPIES_LOG_FILE,
+                lines=cli_args.tail_lines,
+                follow=not cli_args.no_follow,
+            )
+        )
     main()
