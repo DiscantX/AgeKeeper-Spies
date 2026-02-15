@@ -143,5 +143,5 @@ class ToastQueueManager:
         self.last_seen_state_by_player[player_key] = state
 
         if self.status_logger:
-            self.status_logger(player_id, normalized_status, match_id)
+            self.status_logger(player_id, status, match_id)
         self._show_or_queue_player_match(player_id, normalized_status, match_id)
