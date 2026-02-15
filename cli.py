@@ -4,7 +4,7 @@ from spies import task_registration
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="AgeKeeper spies runner.")
+    parser = argparse.ArgumentParser(description="AgeKeeper Spies. Track Aoe2 players as they join lobbies and games, and display a Windows toast notification when they do. Can be run headless as a scheduled task on Windows login.")
     parser.add_argument(
         "--tail-logs",
         action="store_true",
