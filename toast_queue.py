@@ -16,17 +16,28 @@ class ToastQueueManager:
         self.get_match = get_match
         self.build_toast_payload = build_toast_payload
         self.display_payload = display_payload
-        self.valid_statuses = set(valid_statuses)
+        self.valid_statuses = {self._normalize_status(status) for status in valid_statuses}
         self.status_logger = status_logger
 
         self.toast_queue = asyncio.Queue()
         self.pending_wait_tasks = {}
         self.toast_status_by_key = {}
+        self.last_seen_state_by_player = {}
         self._worker_task = None
 
     @staticmethod
-    def _build_toast_key(player_id: str, match_id, status: str):
-        return (str(player_id), str(match_id), status)
+    def _normalize_status(status) -> str:
+        return str(status or "").strip().lower()
+
+    @classmethod
+    def _build_toast_key(cls, player_id: str, match_id, status: str):
+        # Dedupe by player+match+status so state transitions (lobby <-> spectate)
+        # generate separate toasts while repeated updates in the same state do not.
+        return (str(player_id), str(match_id), cls._normalize_status(status))
+
+    @staticmethod
+    def _build_player_state(status: str, match_id):
+        return (str(status), str(match_id))
 
     def start(self):
         """Start the queue worker if it is not already running."""
@@ -100,29 +111,37 @@ class ToastQueueManager:
         self.pending_wait_tasks.pop(key, None)
 
     def _show_or_queue_player_match(self, player_id: str, status: str, match_id) -> None:
-        key = self._build_toast_key(player_id, match_id, status)
+        normalized_status = self._normalize_status(status)
+        key = self._build_toast_key(player_id, match_id, normalized_status)
         state = self.toast_status_by_key.get(key)
         if state in ("queued", "shown"):
             return
 
-        match = self.get_match(status, match_id, print_match_count=True)
+        match = self.get_match(normalized_status, match_id, print_match_count=True)
         if match:
             self._cancel_pending_wait_task(key)
-            self._enqueue_toast_for_player_match(player_id, match, status, match_id)
+            self._enqueue_toast_for_player_match(player_id, match, normalized_status, match_id)
             return
 
-        if status not in self.valid_statuses:
+        if normalized_status not in self.valid_statuses:
             return
         if key in self.pending_wait_tasks and not self.pending_wait_tasks[key].done():
             return
 
         self.toast_status_by_key[key] = "waiting"
         self.pending_wait_tasks[key] = asyncio.create_task(
-            self._wait_for_match_and_enqueue_toast(player_id, status, match_id)
+            self._wait_for_match_and_enqueue_toast(player_id, normalized_status, match_id)
         )
 
     def handle_player_status_update(self, player_id: str, status: str, match_id) -> None:
         """Handle one player status update by enqueueing or waiting for match data."""
+        normalized_status = self._normalize_status(status)
+        state = self._build_player_state(normalized_status, match_id)
+        player_key = str(player_id)
+        if self.last_seen_state_by_player.get(player_key) == state:
+            return
+        self.last_seen_state_by_player[player_key] = state
+
         if self.status_logger:
-            self.status_logger(player_id, status, match_id)
-        self._show_or_queue_player_match(player_id, status, match_id)
+            self.status_logger(player_id, normalized_status, match_id)
+        self._show_or_queue_player_match(player_id, normalized_status, match_id)

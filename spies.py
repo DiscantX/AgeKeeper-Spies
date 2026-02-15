@@ -1,19 +1,27 @@
 from pathlib import Path                            #Creating path objects
+import os
+import sys
+import argparse
+import logging
+from logging.handlers import RotatingFileHandler
 from windows_toasts import (                        #Creating the Windows toasts
     InteractableWindowsToaster,
     Toast,
     ToastAudio,
+    ToastDuration,
     ToastDisplayImage,
     ToastImagePosition,
-    ToastScenario,
-    ToastActivatedEventArgs,
     ToastDismissedEventArgs,
     ToastFailedEventArgs,
 )
 import asyncio                                      #Asyncronous functions
 import time                                         #Getting/parsing current time
-from functools import partial                       #Passing extra params to callback
-from webbrowser import open_new as web_open         #Opening protocol link
+from collections import deque
+
+# Allow running this file directly (e.g., via pythonw spies/spies.py).
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+os.chdir(Path(__file__).resolve().parent.parent)
 
 from lobby import lobby
 from lobby.match_book import MatchBook
@@ -24,6 +32,8 @@ from spies.avatar import (
     resolve_avatar_filepath
     )
 from spies.audio import play_alert_audio
+from spies import task_registration
+from shared.process_guard import acquire_single_instance_lock
 from spies.toast_queue import ToastQueueManager
 
 # Assign default variables
@@ -31,9 +41,191 @@ default_avatar_path = DEFAULT_AVATAR_PATH
 PROJECT_ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 SPIES_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
-# Instantiate the toast & toaster objects for later use
+
+def _resolve_log_file() -> Path:
+    override_dir = os.getenv("AGEKEEPER_LOG_DIR")
+    if override_dir:
+        return Path(override_dir) / "spies.log"
+
+    programdata = os.getenv("ProgramData")
+    if programdata:
+        return Path(programdata) / "AgeKeeper" / "logs" / "spies.log"
+
+    return Path(__file__).resolve().parent / "logs" / "spies.log"
+
+
+SPIES_LOG_FILE = _resolve_log_file()
+
+
+def tail_logs(lines: int = 100, follow: bool = True, poll_interval: float = 0.5) -> int:
+    """Print recent log lines and optionally follow appended output."""
+    if lines < 0:
+        print("--tail-lines must be >= 0")
+        return 2
+
+    log_file = SPIES_LOG_FILE
+    if not log_file.exists():
+        print(f"Log file does not exist yet: {log_file}")
+        return 1
+
+    try:
+        with log_file.open("r", encoding="utf-8", errors="replace") as handle:
+            if lines > 0:
+                for line in deque(handle, maxlen=lines):
+                    print(line, end="")
+            else:
+                handle.seek(0, os.SEEK_END)
+
+            if not follow:
+                return 0
+
+            while True:
+                line = handle.readline()
+                if line:
+                    print(line, end="", flush=True)
+                    continue
+                time.sleep(poll_interval)
+    except KeyboardInterrupt:
+        return 0
+
+
+def build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="AgeKeeper spies runner.")
+    parser.add_argument(
+        "--tail-logs",
+        action="store_true",
+        help="Tail the spies log file instead of starting the spies process.",
+    )
+    parser.add_argument(
+        "--tail-lines",
+        type=int,
+        default=100,
+        help="How many recent lines to print before following logs (default: 100).",
+    )
+    parser.add_argument(
+        "--no-follow",
+        action="store_true",
+        help="When used with --tail-logs, print lines and exit without follow mode.",
+    )
+    parser.add_argument(
+        "--task-register",
+        action="store_true",
+        help="Register spies as a Windows Scheduled Task (headless startup).",
+    )
+    parser.add_argument(
+        "--task-deregister",
+        action="store_true",
+        help="Remove the scheduled task registration.",
+    )
+    parser.add_argument(
+        "--task-status",
+        action="store_true",
+        help="Show scheduled task status.",
+    )
+    parser.add_argument(
+        "--task-start",
+        action="store_true",
+        help="Start the scheduled task now.",
+    )
+    parser.add_argument(
+        "--task-stop",
+        action="store_true",
+        help="Stop the scheduled task if it is running.",
+    )
+    parser.add_argument(
+        "--task-name",
+        default=task_registration.DEFAULT_TASK_NAME,
+        help=f"Scheduled task name (default: {task_registration.DEFAULT_TASK_NAME}).",
+    )
+    parser.add_argument(
+        "--task-python",
+        default=task_registration._default_pythonw(),
+        help="Python executable used for task registration (default: pythonw when available).",
+    )
+    return parser
+
+
+def _handle_task_cli(cli_args) -> int | None:
+    actions = [
+        cli_args.task_register,
+        cli_args.task_deregister,
+        cli_args.task_status,
+        cli_args.task_start,
+        cli_args.task_stop,
+    ]
+    selected = sum(bool(action) for action in actions)
+    if selected == 0:
+        return None
+    if selected > 1:
+        print(
+            "Choose only one task action: --task-register, --task-deregister, "
+            "--task-status, --task-start, --task-stop"
+        )
+        return 2
+
+    if cli_args.task_register:
+        return task_registration.register_task(
+            task_name=cli_args.task_name,
+            python_exe=cli_args.task_python,
+        )
+    if cli_args.task_deregister:
+        return task_registration.deregister_task(task_name=cli_args.task_name)
+    if cli_args.task_start:
+        return task_registration.start_task(task_name=cli_args.task_name)
+    if cli_args.task_stop:
+        return task_registration.stop_task(task_name=cli_args.task_name)
+    return task_registration.show_status(task_name=cli_args.task_name)
+
+
+def _configure_logging() -> logging.Logger:
+    global SPIES_LOG_FILE
+
+    logger = logging.getLogger("agekeeper.spies")
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        "%Y-%m-%d %H:%M:%S",
+    )
+
+    log_file = SPIES_LOG_FILE
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=1_000_000,
+            backupCount=5,
+            encoding="utf-8",
+        )
+    except OSError:
+        # Fallback keeps logging available if preferred location is unavailable.
+        fallback = Path(__file__).resolve().parent / "logs" / "spies.log"
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            fallback,
+            maxBytes=1_000_000,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        SPIES_LOG_FILE = fallback
+
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    logger.propagate = False
+    return logger
+
+
+logger = _configure_logging()
+
+# Instantiate the toaster object for later use
 toaster = InteractableWindowsToaster("AOE2: Spies")
-spyToast = Toast("Spy Alert")
 
 # Instantiate the player watchlist object
 watchlist = Watchlist()
@@ -41,21 +233,6 @@ watchlist = Watchlist()
 #Instantiate the MatchBooks, which will store current matches/lobbies
 lobby_matches = MatchBook("lobby")
 spectate_matches = MatchBook("spectate")
-
-def activated_callback(activatedEventArgs: ToastActivatedEventArgs, short_response_type: str, match_id: str):
-    """Open AoE2 with the selected lobby/spectate target when toast is clicked."""
-    print(f"Toast activated for {short_response_type} with Match ID: {match_id}")
-    match short_response_type:
-        case "lobby":
-            response_type_id = 0
-        case "spectate":
-            response_type_id = 1
-        case _:
-            print("Unknown response type, cannot open game.")
-            return
-    protocol_link = f"aoe2de://{response_type_id}/{match_id}"
-    response = web_open(protocol_link)
-    print(f"Opened {protocol_link} with response: {response}")
 
 def dismissed_callback(dismissedEventArgs: ToastDismissedEventArgs):
     """Handle toast dismissal and clean up the temporary avatar image."""
@@ -67,24 +244,38 @@ def dismissed_callback(dismissedEventArgs: ToastDismissedEventArgs):
     reason = dismissedEventArgs.reason
     reason_value = int(reason)
     reason_name = dismissal_reasons.get(reason_value, str(reason))
-    print(f"Toast dismissed reason: {reason_name} ({reason_value})")
+    logger.info("Toast dismissed reason: %s (%s)", reason_name, reason_value)
 
 def failed_callback(failedEventArgs: ToastFailedEventArgs):
     """Log toast delivery failures reported by the Windows toast API."""
-    print(f"Toast failed: {failedEventArgs.reason}")
+    logger.error("Toast failed: %s", failedEventArgs.reason)
 
 def display_toast(player_name: str, match, status: str, avatar_filepath: str = default_avatar_path):
     """Build and display a spy alert toast with map, civ, and avatar details."""
+    spy_toast = Toast("Spy Alert")
+    match status:
+        case "lobby":
+            response_type_id = 0
+        case "spectate":
+            response_type_id = 1
+        case _:
+            logger.warning("Unknown response type %s, cannot configure toast activation.", status)
+            response_type_id = None
+
+    if response_type_id is not None:
+        match_id = match.get("matchid", -1)
+        protocol_link = f"aoe2de://{response_type_id}/{match_id}"
+        # Use protocol launch on the toast itself to avoid intermittent WinRT callback drops.
+        spy_toast.launch_action = protocol_link
+        logger.info("Toast launch action configured: %s", protocol_link)
+
     # Register toast callbacks
-    spyToast.on_activated = partial(activated_callback, status=status, match_id=match.get("matchid", -1), )
-    spyToast.on_dismissed = dismissed_callback
-    spyToast.on_failed = failed_callback
+    spy_toast.on_dismissed = dismissed_callback
+    spy_toast.on_failed = failed_callback
     
-    # Causes toast to not timeout by mimicking an incoming call
-    # TODO/BUG: The toast sometimes does not receive the click that triggers the activated callback.
-    # May not be related to this specific line, but rather something with the focus of the toast.
-    # Could be an outside issue. Need further investigation.
-    spyToast.scenario = ToastScenario.IncomingCall
+    # Prefer standard long-duration toasts over IncomingCall scenario; this is
+    # more reliable for repeated click activation behavior.
+    spy_toast.duration = ToastDuration.Long
     
     # Prepare all of the required data that will be used when displaying the toast
     player_data = lobby.get_player_slot(player_name, match)
@@ -109,29 +300,25 @@ def display_toast(player_name: str, match, status: str, avatar_filepath: str = d
     ]
     
     #Attach the data that is to be displayed to the toast
-    spyToast.text_fields = toast_fields
+    spy_toast.text_fields = toast_fields
     banner_path = PROJECT_ASSETS_DIR / "AgeKeeperBanner_Cropped.png"
     audio_path = SPIES_ASSETS_DIR / "16_enemy_sighted.mp3"
-    spyToast.AddImage(
+    spy_toast.AddImage(
         ToastDisplayImage.fromPath(
             str(banner_path),
             position=ToastImagePosition.Hero,
         )
     )
-    add_player_avatar_to_toast(spyToast, avatar_filepath)
+    add_player_avatar_to_toast(spy_toast, avatar_filepath)
     # Disable native toast audio to avoid the default Windows ding.
     # We play our custom alert explicitly right after showing the toast.
     # BUG: The built in ToastAudio was not playing the .mp3 file for some reason,
     # so instead we play the audio file ourselves.
-    spyToast.audio = ToastAudio(silent=True)
-    toaster.show_toast(spyToast)
+    spy_toast.audio = ToastAudio(silent=True)
+    toaster.show_toast(spy_toast)
     play_alert_audio(audio_path)
 
-    # Print alert info to console
-    print("\nNew Spy Alert:")
-    print("=" * 40)
-    print("\n".join(toast_fields))
-    print(f"Start time: {time.ctime(time.time())}\n")
+    logger.info("New Spy Alert\n%s\n%s\nStart time: %s", "=" * 40, "\n".join(toast_fields), time.ctime(time.time()))
 
 def _get_match_from_book(status: str, match_id, print_match_count: bool = False):
     """Return a match by id from the status-specific match book."""
@@ -174,7 +361,7 @@ def _log_player_status_update(player_id: str, status: str, match_id) -> None:
     """Log one incoming player status update."""
     player_entry = watchlist.get_entry(player_id, {})
     player_name = player_entry.get("userName") or str(player_id)
-    print(f"{player_name}'s status: {status}, matchid: {match_id}")
+    logger.info("%s's status: %s, matchid: %s", player_name, status, match_id)
 
 
 toast_queue_manager = ToastQueueManager(
@@ -226,7 +413,19 @@ async def main_async():
     
 def main():
     """Program entry point for running the spies event loop."""
+    # Check for other instances running. Not strictly necessary,
+    # but can help when running in background.
+    if not acquire_single_instance_lock("AgeKeeper.Spies"):
+        logger.warning("Another Spies instance is already running. Exiting.")
+        return
+    logger.info(f"{time.ctime(time.time())} | Starting spies process. Log file: {SPIES_LOG_FILE}")
     asyncio.run(main_async())
 
 if __name__ == "__main__":
+    cli_args = build_cli_parser().parse_args()
+    task_cli_result = _handle_task_cli(cli_args)
+    if task_cli_result is not None:
+        raise SystemExit(task_cli_result)
+    if cli_args.tail_logs:
+        raise SystemExit(tail_logs(lines=cli_args.tail_lines, follow=not cli_args.no_follow))
     main()
