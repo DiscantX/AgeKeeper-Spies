@@ -1,11 +1,11 @@
-# agekeeper-spies
+# AgeKeeper-Spies
 
 Standalone Spies watcher runtime extracted from AgeKeeper.
 
 ## Install
 
 ```bash
-pip install "agekeeper-spies @ git+https://github.com/<you-or-org>/agekeeper-spies.git@main"
+pip install "agekeeper-spies @ git+https://github.com/DiscantX/AgeKeeper-Spies.git@main"
 ```
 
 ## Run
