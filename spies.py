@@ -45,7 +45,6 @@ from spies.toast_handlers import (
 
 # Assign default variables
 default_avatar_path = DEFAULT_AVATAR_PATH
-PROJECT_ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 SPIES_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 SPIES_LOG_FILE = resolve_log_file()
 
@@ -143,7 +142,7 @@ def display_toast(
     
     #Attach the data that is to be displayed to the toast
     spy_toast.text_fields = toast_fields
-    banner_path = PROJECT_ASSETS_DIR / "AgeKeeperBanner_Cropped.png"
+    banner_path = SPIES_ASSETS_DIR / "AgeKeeperBanner_Cropped.png"
     audio_path = SPIES_ASSETS_DIR / "16_enemy_sighted.mp3"
     spy_toast.AddImage(
         ToastDisplayImage.fromPath(
