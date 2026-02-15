@@ -7,12 +7,15 @@ Scheduled Task.
 
 ## Features
 
-- Real-time watchlist tracking for AoE2 player activity.
+- Real-time watchlist tracking for AoE2 player activity:
+  - Track when a player joins a lobby.
+  - Track when a player joins a match.
+  - Track when a player leaves either.
 - Toast alerts with player avatar, map, civ, and lobby/game context.
-- Optional custom avatar per watched player.
-- Built-in log tail mode for live process monitoring.
-- Scheduled task lifecycle commands for headless startup.
-- Single-instance guard to prevent duplicate watcher processes.
+- Scheduled task lifecycle commands for headless startup:
+  - Can be started upon Windows user logon.
+  - Built-in log tail mode for live process monitoring.
+  - Single-instance guard to prevent duplicate watcher processes.
 
 ## Requirements
 
@@ -64,83 +67,12 @@ Rules:
 - `profileid` and `userName` can be supplied together or separately.
 - Missing usernames are resolved from IDs.
 - Missing IDs are resolved from usernames.
-- `avatar_filepath` is optional; default avatar is used if missing/empty.
+- Providing a known ID will guarantee an accurate result.
+- Providing a name may not produce an id, or it may produce an inaccurate one:
+  - In the case of no id produced, it could be due to the fact that the search occurs in the leaderboards, and if a player is not ranked in the leaderboard, they will not appear.
+  - An inaccurate id would be the result of multiple players having similar or the same names. The first search result is used.
 
-## Watchlist Schema
-
-Path:
-
-- `spies/watchlist.json`
-
-Top-level type:
-
-- Must be a JSON array (`[]`).
-- Any non-array top-level value causes a runtime `ValueError`.
-
-Allowed entry forms:
-
-- Object form:
-  - `{ "profileid": "123456", "userName": "PlayerName", "avatar_filepath": "path/to/avatar.png" }`
-- ID shorthand:
-  - `"123456"` or `123456`
-
-Field rules (object form):
-
-| Field | Required | Type | Notes |
-| --- | --- | --- | --- |
-| `profileid` | No | string or number | Normalized to string internally. |
-| `userName` | No | string | Used for reverse lookup when `profileid` missing. |
-| `avatar_filepath` | No | string | If missing/empty, defaults to `spies/assets/default_avatar.png`. |
-
-Validation and normalization behavior:
-
-- Non-object/non-string/non-number entries are ignored.
-- Entries with neither resolvable `profileid` nor resolvable `userName` do not end up in the active index.
-- On load, Spies tries to fill missing usernames from IDs and missing IDs from usernames.
-- If enrichment succeeds, `watchlist.json` is rewritten with updated values.
-
-Recommended constraints (best practice):
-
-- Keep `profileid` numeric characters only.
-- Keep `userName` non-empty and exact (case-sensitive match as provided by API source).
-- Use absolute or repo-relative paths for `avatar_filepath` to avoid path ambiguity.
-- Ensure avatar files exist and are readable.
-
-### Valid examples
-
-```json
-[
-  { "profileid": "199325", "userName": "Hera" },
-  { "profileid": 123456 },
-  { "userName": "TheViper", "avatar_filepath": "C:/avatars/viper.png" },
-  "9101112"
-]
-```
-
-### Invalid or problematic examples
-
-```json
-{
-  "profileid": "199325"
-}
-```
-
-Why problematic:
-
-- Top-level object is invalid; file must be an array.
-
-```json
-[
-  [],
-  { "avatar_filepath": "C:/avatars/no_id_or_name.png" },
-  null
-]
-```
-
-Why problematic:
-
-- `[]` and `null` entries are ignored.
-- Entry with only `avatar_filepath` has no identity field and cannot be tracked.
+- `avatar_filepath` is optional; default avatar is used if missing/empty. It will be updated automatically with the profile's Steam avatar the first time it is encountered or changed.
 
 ### 2) Start Spies
 
@@ -214,16 +146,22 @@ Start watcher in foreground:
 agekeeper-spies
 ```
 
-Show current scheduled task details:
-
-```bash
-agekeeper-spies --task-status
-```
-
 Register headless startup at login:
 
 ```bash
 agekeeper-spies --task-register
+```
+
+Start scheduled task:
+
+```bash
+agekeeper-spies --task-start
+```
+
+Show current scheduled task details:
+
+```bash
+agekeeper-spies --task-status
 ```
 
 Tail only the latest 50 lines and exit:
