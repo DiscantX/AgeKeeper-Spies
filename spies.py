@@ -62,27 +62,14 @@ toaster = InteractableWindowsToaster("AOE2: Spies")
 # Instantiate the player watchlist object
 watchlist = Watchlist()
 
-#Instantiate the MatchBooks, which will store current matches/lobbies
-lobby_matches = MatchBook("lobby")
-spectate_matches = MatchBook("spectate")
+# Instantiation happens in main_async().
+toast_queue_manager = None
 
 def _log_player_status_update(player_id: str, status: str, match_id) -> None:
     """Log one incoming player status update."""
     player_entry = watchlist.get_entry(player_id, {})
     player_name = player_entry.get("userName") or str(player_id)
     logger.info("%s's status: %s, matchid: %s", player_name, status, match_id)
-
-def _get_match_from_book(status: str, match_id, print_match_count: bool = False):
-    """Return a match by id from the status-specific match book."""
-    if status == "lobby":
-        match_book = lobby_matches
-    elif status == "spectate":
-        match_book = spectate_matches
-    else:
-        return None
-    if print_match_count:
-        match_book.print_number_of_matches()
-    return match_book.get_match_by_id(match_id)
 
 def _build_toast_payload(player_id: str, match, status: str, match_id):
     """Create payload data used by the toast queue worker."""
@@ -107,7 +94,13 @@ def _display_toast_payload(payload) -> None:
         avatar_filepath=payload["avatar_filepath"],
     )
 
-def display_toast(player_name: str, match, status: str, avatar_filepath: str = default_avatar_path):
+def display_toast(
+    player_name: str,
+    match,
+    status: str,
+    avatar_filepath: str = default_avatar_path,
+    left_match: bool = False,
+):
     """Build and display a spy alert toast with map, civ, and avatar details."""
     spy_toast = Toast("Spy Alert")
     configure_toast_launch_action(spy_toast, status, match, logger)
@@ -135,8 +128,15 @@ def display_toast(player_name: str, match, status: str, avatar_filepath: str = d
         case "spectate":
             subscription_description = "game"
             
+    activity_text = (
+        f"{player_name[:25]} left {subscription_description}:\n"
+        f"{match.get('description', f'a {subscription_description}')}"
+        if left_match
+        else f"{player_name[:25]} is in {subscription_description}:\n"
+        f"{match.get('description', f'a {subscription_description}')}"
+    )
     toast_fields = [
-        f"{player_name[:25]} is in {subscription_description}:\n{match.get('description', f'a {subscription_description}')}",
+        activity_text,
         f"Map: {match.get('map_name', 'Unknown Map')} | Playing as: {player_civ_name}",
         f"Started: {match_time_alive}s ago | {match.get('slots_taken', -1)} Player{'s' if match.get('slots_taken', -1) != 1 else ''} in {subscription_description}",
     ]
@@ -162,13 +162,22 @@ def display_toast(player_name: str, match, status: str, avatar_filepath: str = d
 
     logger.info("New Spy Alert\n%s\n%s\nStart time: %s", "=" * 40, "\n".join(toast_fields), time.ctime(time.time()))
 
-# Instantiate the toast queue manager
-toast_queue_manager = ToastQueueManager(
-    get_match=_get_match_from_book,
-    build_toast_payload=_build_toast_payload,
-    display_payload=_display_toast_payload,
-    status_logger=_log_player_status_update,
-)
+def _handle_matchbook_player_remove(player_id: str, status: str, match_id, match) -> None:
+    if watchlist.get_entry(player_id) is None:
+        return
+
+    payload = _build_toast_payload(player_id, match, status, match_id)
+    if not payload:
+        return
+
+    _log_player_status_update(player_id, f"left_{status}", match_id)
+    display_toast(
+        player_name=payload["player_name"],
+        match=payload["match"],
+        status=payload["status"],
+        avatar_filepath=payload["avatar_filepath"],
+        left_match=True,
+    )
 
 def spy(event, **kwargs):
     """Dispatch incoming subscription events to the relevant spy handlers."""
@@ -180,10 +189,35 @@ def spy(event, **kwargs):
             if parsed_status is None:
                 return
             player_id, status, match_id = parsed_status
+            MatchBook.resolve_pending_lobby_leave_from_player_status(player_id, status, match_id)
             toast_queue_manager.handle_player_status_update(player_id, status, match_id)
 
 async def main_async():
     """Initialize state, subscribe to watchlist players, and run indefinitely."""
+    # Instantiate MatchBook instances.
+    lobby_matches = MatchBook("lobby", on_player_remove=_handle_matchbook_player_remove)
+    spectate_matches = MatchBook("spectate", on_player_remove=_handle_matchbook_player_remove)
+
+    def get_match_from_book(status: str, match_id, print_match_count: bool = False):
+        """Return a match by id from the status-specific match book."""
+        if status == "lobby":
+            match_book = lobby_matches
+        elif status == "spectate":
+            match_book = spectate_matches
+        else:
+            return None
+        if print_match_count:
+            match_book.print_number_of_matches()
+        return match_book.get_match_by_id(match_id)
+
+    global toast_queue_manager
+    toast_queue_manager = ToastQueueManager(
+        get_match=get_match_from_book,
+        build_toast_payload=_build_toast_payload,
+        display_payload=_display_toast_payload,
+        status_logger=_log_player_status_update,
+    )
+
     # Start the MatchBook instances. This will cause them to connect to their subscriptions
     # and begin updating their internal lists of matches.
     lobby_matches.start()
