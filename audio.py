@@ -1,3 +1,5 @@
+"""Audio playback helpers for spy toast alerts."""
+
 from pathlib import Path
 import ctypes
 
@@ -6,6 +8,7 @@ MCI_ALIAS = "AgeKeeperSpyAlert"
 
 
 def play_alert_audio(audio_path: Path) -> None:
+    """Play the configured local alert sound through the Windows MCI API."""
     # Toast custom file audio can be ignored in some desktop app contexts.
     # Use the Windows MCI API to play the local media file directly.
     if not audio_path.exists():

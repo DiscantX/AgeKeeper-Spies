@@ -1,5 +1,5 @@
-from pathlib import Path
-from windows_toasts import (
+from pathlib import Path                            #Creating path objects
+from windows_toasts import (                        #Creating the Windows toasts
     InteractableWindowsToaster,
     Toast,
     ToastAudio,
@@ -10,55 +10,64 @@ from windows_toasts import (
     ToastDismissedEventArgs,
     ToastFailedEventArgs,
 )
-import asyncio
-import time
-from functools import partial
-from webbrowser import open_new as web_open
+import asyncio                                      #Asyncronous functions
+import time                                         #Getting/parsing current time
+from functools import partial                       #Passing extra params to callback
+from webbrowser import open_new as web_open         #Opening protocol link
 
 from lobby import lobby
 from lobby.match_book import MatchBook
+from lobby.utils import extract_player_status_update
 from spies.watchlist import DEFAULT_AVATAR_PATH, Watchlist
-from spies.avatar import add_player_avatar_to_toast, resolve_avatar_filepath, remove_image
+from spies.avatar import (
+    add_player_avatar_to_toast,
+    resolve_avatar_filepath
+    )
 from spies.audio import play_alert_audio
+from spies.toast_queue import ToastQueueManager
 
 # Assign default variables
 default_avatar_path = DEFAULT_AVATAR_PATH
 PROJECT_ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 SPIES_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
-# Create the toast/toaster objects for later use
+# Instantiate the toast & toaster objects for later use
 toaster = InteractableWindowsToaster("AOE2: Spies")
 spyToast = Toast("Spy Alert")
 
+# Instantiate the player watchlist object
 watchlist = Watchlist()
 
+#Instantiate the MatchBooks, which will store current matches/lobbies
 lobby_matches = MatchBook("lobby")
 spectate_matches = MatchBook("spectate")
-toast_queue = asyncio.Queue()
-pending_wait_tasks = {}
-toast_status_by_key = {}
 
-def activated_callback(
-    activatedEventArgs: ToastActivatedEventArgs, short_response_type: str, match_id: str
-):
+def activated_callback(activatedEventArgs: ToastActivatedEventArgs, short_response_type: str, match_id: str):
     """Open AoE2 with the selected lobby/spectate target when toast is clicked."""
-    print(short_response_type)
     print(f"Toast activated for {short_response_type} with Match ID: {match_id}")
-    if short_response_type == "lobby":
-        response_type_id = 0
-    elif short_response_type == "spectate":
-        response_type_id = 1
-    else:
-        print("Unknown response type, cannot open game.")
-        return
-    response = web_open(f"aoe2de://{response_type_id}/{match_id}")
-    print(f"Web open response: {response}")
-    remove_image()
+    match short_response_type:
+        case "lobby":
+            response_type_id = 0
+        case "spectate":
+            response_type_id = 1
+        case _:
+            print("Unknown response type, cannot open game.")
+            return
+    protocol_link = f"aoe2de://{response_type_id}/{match_id}"
+    response = web_open(protocol_link)
+    print(f"Opened {protocol_link} with response: {response}")
 
 def dismissed_callback(dismissedEventArgs: ToastDismissedEventArgs):
     """Handle toast dismissal and clean up the temporary avatar image."""
-    print(f"Toast dismissed reason: {dismissedEventArgs.reason}")
-    remove_image()
+    dismissal_reasons = {
+        0: "UserCanceled",
+        1: "ApplicationHidden",
+        2: "TimedOut",
+    }
+    reason = dismissedEventArgs.reason
+    reason_value = int(reason)
+    reason_name = dismissal_reasons.get(reason_value, str(reason))
+    print(f"Toast dismissed reason: {reason_name} ({reason_value})")
 
 def failed_callback(failedEventArgs: ToastFailedEventArgs):
     """Log toast delivery failures reported by the Windows toast API."""
@@ -136,134 +145,44 @@ def _get_match_from_book(status: str, match_id, print_match_count: bool = False)
         match_book.print_number_of_matches()
     return match_book.get_match_by_id(match_id)
 
-#<--------------------------------- Toast queue --------------------------------------->
-# In order to solve a race condition issue in which a player's status updates before the match infomation
-# is received, we enqueue ready toast payloads and process them through one worker.
-# Each (player_id, match_id, status) key is tracked so it is only queued/displayed once.
-
-def _build_toast_key(player_id: str, match_id, status: str):
-    """Build a stable key used to dedupe toast lifecycle states."""
-    return (str(player_id), str(match_id), status)
-
-
-def _enqueue_toast_for_player_match(player_id: str, match, status: str, match_id) -> None:
-    """Queue one toast payload per (player, match, status) key."""
-    key = _build_toast_key(player_id, match_id, status)
-    if toast_status_by_key.get(key) in ("queued", "shown"):
-        return
-    # Claim the key before any expensive work so concurrent paths cannot double-enqueue.
-    toast_status_by_key[key] = "queued"
-
-    try:
-        player_entry = watchlist.get_entry(player_id, {})
-        player_name = player_entry.get("userName") or str(player_id)
-        avatar_filepath = resolve_avatar_filepath(
-            player_entry, match, watchlist.by_id, watchlist.save_index
-        )
-        toast_queue.put_nowait(
-            {
-                "key": key,
-                "player_name": player_name,
-                "match": match,
-                "status": status,
-                "avatar_filepath": avatar_filepath,
-            }
-        )
-    except Exception:
-        # Release failed queue claims so future updates can retry.
-        if toast_status_by_key.get(key) == "queued":
-            toast_status_by_key.pop(key, None)
-        raise
+def _build_toast_payload(player_id: str, match, status: str, match_id):
+    """Create payload data used by the toast queue worker."""
+    player_entry = watchlist.get_entry(player_id, {})
+    player_name = player_entry.get("userName") or str(player_id)
+    avatar_filepath = resolve_avatar_filepath(
+        player_entry, match, watchlist.by_id, watchlist.save_index
+    )
+    return {
+        "player_name": player_name,
+        "match": match,
+        "status": status,
+        "avatar_filepath": avatar_filepath,
+    }
 
 
-async def _toast_queue_worker() -> None:
-    """Display queued toasts sequentially."""
-    while True:
-        payload = await toast_queue.get()
-        key = payload["key"]
-        try:
-            display_toast(
-                player_name=payload["player_name"],
-                match=payload["match"],
-                status=payload["status"],
-                avatar_filepath=payload["avatar_filepath"],
-            )
-            toast_status_by_key[key] = "shown"
-        finally:
-            toast_queue.task_done()
-
-
-async def _wait_for_match_and_enqueue_toast(
-    player_id: str,
-    status: str,
-    match_id,
-    timeout_seconds: float = 12.0,
-    poll_interval_seconds: float = 0.4,
-) -> None:
-    """Poll for a match for a short window, then enqueue a toast when available."""
-    key = _build_toast_key(player_id, match_id, status)
-    start = time.monotonic()
-    while time.monotonic() - start < timeout_seconds:
-        match = _get_match_from_book(status, match_id)
-        if match:
-            _enqueue_toast_for_player_match(player_id, match, status, match_id)
-            break
-        await asyncio.sleep(poll_interval_seconds)
-    pending_wait_tasks.pop(key, None)
-    if toast_status_by_key.get(key) == "waiting":
-        toast_status_by_key.pop(key, None)
-
-
-def _cancel_pending_match_task(key) -> None:
-    """Cancel and remove a pending wait task for a key, if one exists."""
-    pending_task = pending_wait_tasks.get(key)
-    if pending_task and not pending_task.done():
-        pending_task.cancel()
-    pending_wait_tasks.pop(key, None)
-
-
-def _show_or_queue_player_match(player_id: str, status: str, match_id) -> None:
-    """Queue toast immediately when match exists, otherwise start a single waiter."""
-    key = _build_toast_key(player_id, match_id, status)
-    state = toast_status_by_key.get(key)
-    if state in ("queued", "shown"):
-        return
-
-    match = _get_match_from_book(status, match_id, print_match_count=True)
-    if match:
-        _cancel_pending_match_task(key)
-        _enqueue_toast_for_player_match(player_id, match, status, match_id)
-        return
-
-    if status not in ("lobby", "spectate"):
-        return
-    if key in pending_wait_tasks and not pending_wait_tasks[key].done():
-        return
-
-    toast_status_by_key[key] = "waiting"
-    pending_wait_tasks[key] = asyncio.create_task(
-        _wait_for_match_and_enqueue_toast(player_id, status, match_id)
+def _display_toast_payload(payload) -> None:
+    """Render one queued payload as a Windows toast."""
+    display_toast(
+        player_name=payload["player_name"],
+        match=payload["match"],
+        status=payload["status"],
+        avatar_filepath=payload["avatar_filepath"],
     )
 
-def _extract_player_status_update(event):
-    """Extract player_id/status/match_id tuple from a player_status event."""
-    player_status = event.get("player_status", {})
-    player_id = list(player_status.keys())[0] if player_status else None
-    if player_id is None:
-        print("No player status found in event.")
-        return None
 
-    player_state = player_status.get(player_id) or {}
-    status = player_state.get("status")
-    match_id = player_state.get("matchid")
-    return player_id, status, match_id
-
-def _handle_player_status_update(player_id: str, status: str, match_id) -> None:
-    """Handle a single player status update and decide toast queue actions."""
+def _log_player_status_update(player_id: str, status: str, match_id) -> None:
+    """Log one incoming player status update."""
     player_entry = watchlist.get_entry(player_id, {})
     player_name = player_entry.get("userName") or str(player_id)
     print(f"{player_name}'s status: {status}, matchid: {match_id}")
-    _show_or_queue_player_match(player_id, status, match_id)
+
+
+toast_queue_manager = ToastQueueManager(
+    get_match=_get_match_from_book,
+    build_toast_payload=_build_toast_payload,
+    display_payload=_display_toast_payload,
+    status_logger=_log_player_status_update,
+)
 
 def spy(event, **kwargs):
     """Dispatch incoming subscription events to the relevant spy handlers."""
@@ -271,15 +190,15 @@ def spy(event, **kwargs):
     match response_type:
         case "player_status":
             # Fast-path for the only response type currently used by this module.
-            parsed_status = _extract_player_status_update(event)
+            parsed_status = extract_player_status_update(event)
             if parsed_status is None:
                 return
             player_id, status, match_id = parsed_status
-            _handle_player_status_update(player_id, status, match_id)
+            toast_queue_manager.handle_player_status_update(player_id, status, match_id)
 
 async def main_async():
     """Initialize state, subscribe to watchlist players, and run indefinitely."""
-    # Start the MatchBook instances. This will casue them to connect to their subscriptions
+    # Start the MatchBook instances. This will cause them to connect to their subscriptions
     # and begin updating their internal lists of matches.
     lobby_matches.start()
     spectate_matches.start()
@@ -291,9 +210,9 @@ async def main_async():
         return
 
     # Start the toast queue worker before subscription events begin arriving.
-    toast_worker_task = asyncio.create_task(_toast_queue_worker())
+    toast_queue_manager.start()
     
-    # Subscribe to the "players" subscription. This allows us to see when a players status
+    # Subscribe to the "players" subscription. This allows us to see when a player's status
     # has changed. Subscriptions to "lobby" and "spectate" have already occurred when their
     # MatchBook(s) were instantiated, so no need to do it again.
     subscriptions = lobby.subscribe(["players"], player_ids=profile_ids)
@@ -303,7 +222,7 @@ async def main_async():
     try:
         await asyncio.Event().wait()
     finally:
-        toast_worker_task.cancel()
+        await toast_queue_manager.stop()
     
 def main():
     """Program entry point for running the spies event loop."""
