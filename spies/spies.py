@@ -108,7 +108,7 @@ def display_toast(
     spy_toast.on_dismissed = partial(log_toast_dismissal, logger=logger)
     spy_toast.on_failed = partial(log_toast_failure, logger=logger)
     
-    # Ser toast duration so they display for a long time
+    # Set toast duration so they display for a long time
     spy_toast.duration = ToastDuration.Long
     
     # Prepare all of the required data that will be used when displaying the toast
@@ -142,7 +142,7 @@ def display_toast(
     
     #Attach the data that is to be displayed to the toast
     spy_toast.text_fields = toast_fields
-    banner_path = SPIES_ASSETS_DIR / "AgeKeeperBanner_Cropped.png"
+    banner_path = SPIES_ASSETS_DIR / "AgeKeeper-SpiesBanner_Cropped.png"
     audio_path = SPIES_ASSETS_DIR / "16_enemy_sighted.mp3"
     spy_toast.AddImage(
         ToastDisplayImage.fromPath(

@@ -1,3 +1,5 @@
+<img width="1226" height="344" alt="AgeKeeper Spies Banner" src="spies\assets\AgeKeeper-SpiesBanner_Cropped.png">
+
 # AgeKeeper Spies
 
 AgeKeeper Spies watches tracked AoE2 players and raises Windows toast
