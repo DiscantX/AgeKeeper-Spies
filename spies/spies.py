@@ -34,7 +34,7 @@ from spies.avatar import (
     )
 from spies.audio import play_alert_audio
 from spies.cli import build_cli_parser, handle_task_cli
-from shared.process_guard import acquire_single_instance_lock
+from spies.register_hkey_aumid import register_hkey
 from spies.toast_queue import ToastQueueManager
 from spies.logging_utils import configure_rotating_logger, resolve_log_file, tail_logs
 from spies.toast_handlers import (
@@ -42,6 +42,7 @@ from spies.toast_handlers import (
     log_toast_dismissal,
     log_toast_failure,
 )
+from shared.process_guard import acquire_single_instance_lock
 
 # Assign default variables
 default_avatar_path = DEFAULT_AVATAR_PATH
@@ -56,7 +57,7 @@ logger, SPIES_LOG_FILE = configure_rotating_logger(
 )
 
 # Instantiate the toaster object for later use
-toaster = InteractableWindowsToaster("AOE2: Spies")
+toaster = InteractableWindowsToaster("AOE2: Spies", notifierAUMID="AgeKeeper.AgeKeeper.Spies")
 
 # Instantiate the player watchlist object
 watchlist = Watchlist()
@@ -261,6 +262,8 @@ if __name__ == "__main__":
     task_cli_result = handle_task_cli(cli_args)
     if task_cli_result is not None:
         raise SystemExit(task_cli_result)
+    
+    register_hkey("AgeKeeper.AgeKeeper.Spies", "AgeKeeper Spies", Path("spies/assets/AgeKeeper-Spies.ico"))
     
     # Rather than run the main_async process, tail (display) the log file.
     # Most useful for when a seperate process is already running the script.
